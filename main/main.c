@@ -7,9 +7,11 @@
 // portrait.  Frames are rotated 90° CW in software so the full frame fills
 // the screen — hold the device in landscape to view normally.
 //
-// A/V sync is not implemented yet.  This version targets 5 fps with timing
-// instrumentation to establish a baseline before audio is added.
+// A/V sync: video frame timestamps are derived from the I2S sample counter.
+// esp_codec_dev_write() returns when DMA accepts data, not when it plays.
+// Subtract the DMA buffer depth to get the true playback position.
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -54,8 +56,13 @@ static int s_wifi_retries = 0;
 #define FRAME_INTERVAL_US  0
 
 // Audio: 16 kHz mono u8 PCM.  100 ms chunks → server round-trip fits in DMA buffer.
-#define AUDIO_SAMPLE_RATE   16000
-#define AUDIO_CHUNK_SAMPLES 1600  // 100 ms
+#define AUDIO_SAMPLE_RATE         16000
+#define AUDIO_CHUNK_SAMPLES       1600   // 100 ms per HTTP fetch
+#define AUDIO_DMA_LATENCY_SAMPLES 7680   // 8 desc × 960 frames = 480 ms in DMA
+
+// Shared A/V sync clock — written by audio task, read by video task.
+// Counts samples accepted by DMA (not yet played; subtract latency for playback pos).
+static _Atomic int64_t s_audio_samples = 0;
 
 // ---------------------------------------------------------------------------
 // WiFi
@@ -249,6 +256,7 @@ static void audio_task(void *arg)
         for (size_t i = 0; i < got; i++)
             s16_buf[i] = (int16_t)((int)u8_buf[i] - 128) << 8;
         esp_codec_dev_write(spk, s16_buf, (int)(got * sizeof(int16_t)));
+        atomic_fetch_add(&s_audio_samples, (int64_t)got);
         sample_pos += (int)got;
     }
 }
@@ -295,14 +303,23 @@ static void video_task(void *arg)
     if (!backbuf) backbuf = board_lcd_framebuffer();  // fallback
     assert(backbuf);
 
-    ESP_LOGI(TAG, "Video task running, target=5fps, rotate=90CW");
-
     int64_t t_run_start = esp_timer_get_time();
     int     frame_num   = 0;
 
+    ESP_LOGI(TAG, "Video task running, A/V sync via I2S sample counter");
+
     while (1) {
         int64_t t_frame = esp_timer_get_time();
-        int     ms      = (int)((t_frame - t_run_start) / 1000);
+
+        // A/V sync: video timestamp tracks audio playback position.
+        // Fall back to wall clock until DMA has buffered enough to start.
+        int64_t samples = atomic_load(&s_audio_samples);
+        int ms;
+        if (samples > AUDIO_DMA_LATENCY_SAMPLES) {
+            ms = (int)((samples - AUDIO_DMA_LATENCY_SAMPLES) * 1000 / AUDIO_SAMPLE_RATE);
+        } else {
+            ms = (int)((t_frame - t_run_start) / 1000);
+        }
 
         // --- Fetch ---
         int64_t t0 = esp_timer_get_time();
