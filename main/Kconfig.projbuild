@@ -1,0 +1,33 @@
+menu "Video Stream Config"
+
+    config WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        help
+            SSID of the WiFi network to connect to.
+
+    config WIFI_PASS
+        string "WiFi password"
+        default ""
+        help
+            WPA2 passphrase for the network.
+
+    config SERVER_IP
+        string "Server IP address"
+        default "192.168.68.65"
+        help
+            IP address of the Pi video stream server.
+
+    config SERVER_PORT
+        int "Server port"
+        default 8080
+        help
+            HTTP port the server listens on.
+
+    config CHANNEL
+        string "Channel name"
+        default "big_buck_bunny"
+        help
+            Channel name as defined in the server's channels.json.
+
+endmenu

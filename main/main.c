@@ -1,0 +1,415 @@
+// Copyright 2025-2026 David M. King
+// SPDX-License-Identifier: Apache-2.0
+//
+// WiFi connect → fetch JPEG frames from Pi server → HW decode → display.
+//
+// The server produces 1280×720 landscape frames.  The display is 720×1280
+// portrait.  Frames are rotated 90° CW in software so the full frame fills
+// the screen — hold the device in landscape to view normally.
+//
+// A/V sync is not implemented yet.  This version targets 5 fps with timing
+// instrumentation to establish a baseline before audio is added.
+
+#include <stdio.h>
+#include <string.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/task.h"
+
+#include "driver/jpeg_decode.h"
+#include "driver/ppa.h"
+#include "esp_cache.h"
+#include "esp_codec_dev.h"
+#include "esp_event.h"
+#include "esp_heap_caps.h"
+#include "esp_hosted.h"
+#include "esp_http_client.h"
+#include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_timer.h"
+#include "esp_wifi.h"
+#include "nvs_flash.h"
+
+#include "board_interface.h"
+
+static const char *TAG = "APP";
+
+// WiFi event group bits
+#define WIFI_CONNECTED_BIT  BIT0
+#define WIFI_FAIL_BIT       BIT1
+#define WIFI_MAX_RETRIES    10
+
+static EventGroupHandle_t s_wifi_eg;
+static int s_wifi_retries = 0;
+
+// Source (server) frame dimensions
+#define SRC_W  1280
+#define SRC_H  720
+
+// JPEG input buffer size — 256 KB is generous for 1280×720 at q:v 4
+#define JPEG_IN_MAX  (256 * 1024)
+
+// Target frame interval — run as fast as possible (rotation is the bottleneck)
+#define FRAME_INTERVAL_US  0
+
+// Audio: 16 kHz mono u8 PCM.  100 ms chunks → server round-trip fits in DMA buffer.
+#define AUDIO_SAMPLE_RATE   16000
+#define AUDIO_CHUNK_SAMPLES 1600  // 100 ms
+
+// ---------------------------------------------------------------------------
+// WiFi
+// ---------------------------------------------------------------------------
+
+static void wifi_event_handler(void *arg, esp_event_base_t base,
+                               int32_t id, void *data)
+{
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_wifi_retries < WIFI_MAX_RETRIES) {
+            s_wifi_retries++;
+            ESP_LOGW(TAG, "WiFi disconnected, retry %d/%d", s_wifi_retries, WIFI_MAX_RETRIES);
+            esp_wifi_connect();
+        } else {
+            xEventGroupSetBits(s_wifi_eg, WIFI_FAIL_BIT);
+        }
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
+        ESP_LOGI(TAG, "WiFi connected, IP: " IPSTR, IP2STR(&ev->ip_info.ip));
+        s_wifi_retries = 0;
+        xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
+    }
+}
+
+static bool wifi_init(void)
+{
+    // esp_hosted MUST be initialized before anything in the WiFi stack.
+    ESP_LOGI(TAG, "Initializing ESP32-C6 co-processor...");
+    ESP_ERROR_CHECK(esp_hosted_init());
+    ESP_ERROR_CHECK(esp_hosted_connect_to_slave());
+    ESP_LOGI(TAG, "Co-processor ready");
+
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    s_wifi_eg = xEventGroupCreate();
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                               wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                               wifi_event_handler, NULL));
+
+    wifi_config_t wifi_cfg = {
+        .sta = {
+            .ssid     = CONFIG_WIFI_SSID,
+            .password = CONFIG_WIFI_PASS,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_LOGI(TAG, "Connecting to '%s'...", CONFIG_WIFI_SSID);
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_eg,
+        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
+
+    if (bits & WIFI_CONNECTED_BIT) return true;
+    ESP_LOGE(TAG, "Failed to connect to WiFi");
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// HTTP frame fetch
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    uint8_t *buf;
+    size_t   capacity;
+    size_t   written;
+} http_ctx_t;
+
+static esp_err_t http_event_cb(esp_http_client_event_t *evt)
+{
+    http_ctx_t *ctx = (http_ctx_t *)evt->user_data;
+    if (evt->event_id == HTTP_EVENT_ON_DATA && ctx) {
+        size_t avail = ctx->capacity - ctx->written;
+        size_t n = (size_t)evt->data_len < avail ? (size_t)evt->data_len : avail;
+        memcpy(ctx->buf + ctx->written, evt->data, n);
+        ctx->written += n;
+    }
+    return ESP_OK;
+}
+
+// Fetches /frame/<channel>/<ms> into jpeg_buf, returns number of bytes
+// received (0 on error).
+static size_t fetch_frame(uint8_t *jpeg_buf, size_t buf_capacity, int ms)
+{
+    char url[128];
+    snprintf(url, sizeof(url), "http://%s:%d/frame/%s/%d",
+             CONFIG_SERVER_IP, CONFIG_SERVER_PORT, CONFIG_CHANNEL, ms);
+
+    http_ctx_t ctx = { .buf = jpeg_buf, .capacity = buf_capacity, .written = 0 };
+
+    esp_http_client_config_t hcfg = {
+        .url           = url,
+        .event_handler = http_event_cb,
+        .user_data     = &ctx,
+        .timeout_ms    = 10000,
+        .buffer_size   = 8192,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&hcfg);
+    esp_err_t err = esp_http_client_perform(client);
+    int status    = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+
+    if (err != ESP_OK || status != 200) {
+        ESP_LOGW(TAG, "fetch_frame(%d) err=%s status=%d", ms,
+                 esp_err_to_name(err), status);
+        return 0;
+    }
+    return ctx.written;
+}
+
+// ---------------------------------------------------------------------------
+// Audio fetch + task
+// ---------------------------------------------------------------------------
+
+static size_t fetch_audio(uint8_t *buf, size_t buf_cap, int start, int count)
+{
+    char url[128];
+    snprintf(url, sizeof(url), "http://%s:%d/audio/%s/%d/%d",
+             CONFIG_SERVER_IP, CONFIG_SERVER_PORT, CONFIG_CHANNEL, start, count);
+
+    http_ctx_t ctx = { .buf = buf, .capacity = buf_cap, .written = 0 };
+    esp_http_client_config_t hcfg = {
+        .url           = url,
+        .event_handler = http_event_cb,
+        .user_data     = &ctx,
+        .timeout_ms    = 5000,
+        .buffer_size   = 4096,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&hcfg);
+    esp_err_t err = esp_http_client_perform(client);
+    int status    = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    if (err != ESP_OK || status != 200) {
+        ESP_LOGW(TAG, "fetch_audio(%d,%d) err=%s status=%d", start, count,
+                 esp_err_to_name(err), status);
+        return 0;
+    }
+    return ctx.written;
+}
+
+static void audio_task(void *arg)
+{
+    esp_codec_dev_handle_t spk = (esp_codec_dev_handle_t)arg;
+
+    uint8_t *u8_buf  = heap_caps_malloc(AUDIO_CHUNK_SAMPLES, MALLOC_CAP_INTERNAL);
+    int16_t *s16_buf = heap_caps_malloc(AUDIO_CHUNK_SAMPLES * sizeof(int16_t),
+                                        MALLOC_CAP_INTERNAL);
+    assert(u8_buf && s16_buf);
+
+    esp_codec_dev_sample_info_t fs = {
+        .bits_per_sample = 16,
+        .channel         = 1,
+        .sample_rate     = AUDIO_SAMPLE_RATE,
+    };
+    int ret = esp_codec_dev_open(spk, &fs);
+    if (ret != ESP_CODEC_DEV_OK) {
+        ESP_LOGE(TAG, "esp_codec_dev_open failed: %d", ret);
+        vTaskDelete(NULL);
+    }
+    esp_codec_dev_set_out_vol(spk, 75);
+
+    int sample_pos = 0;
+    ESP_LOGI(TAG, "Audio task running @ %d Hz, chunk=%d samples",
+             AUDIO_SAMPLE_RATE, AUDIO_CHUNK_SAMPLES);
+
+    while (1) {
+        size_t got = fetch_audio(u8_buf, AUDIO_CHUNK_SAMPLES,
+                                 sample_pos, AUDIO_CHUNK_SAMPLES);
+        if (got == 0) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        // u8 PCM (0-255, centre=128) → s16 PCM
+        for (size_t i = 0; i < got; i++)
+            s16_buf[i] = (int16_t)((int)u8_buf[i] - 128) << 8;
+        esp_codec_dev_write(spk, s16_buf, (int)(got * sizeof(int16_t)));
+        sample_pos += (int)got;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Video task
+// ---------------------------------------------------------------------------
+
+static void video_task(void *arg)
+{
+    // Allocate DMA-aligned JPEG input buffer in PSRAM
+    jpeg_decode_memory_alloc_cfg_t in_cfg = {
+        .buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER,
+    };
+    size_t jpeg_in_size = 0;
+    uint8_t *jpeg_in = (uint8_t *)jpeg_alloc_decoder_mem(JPEG_IN_MAX, &in_cfg,
+                                                          &jpeg_in_size);
+    assert(jpeg_in && "JPEG input buffer allocation failed");
+
+    // Allocate DMA-aligned JPEG output buffer for SRC_W × SRC_H RGB565
+    jpeg_decode_memory_alloc_cfg_t out_cfg = {
+        .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
+    };
+    size_t jpeg_out_size = 0;
+    uint8_t *jpeg_out = (uint8_t *)jpeg_alloc_decoder_mem(
+        SRC_W * SRC_H * 2, &out_cfg, &jpeg_out_size);
+    assert(jpeg_out && "JPEG output buffer allocation failed");
+
+    // Create hardware JPEG decoder
+    jpeg_decode_engine_cfg_t eng_cfg = { .timeout_ms = 1000 };
+    jpeg_decoder_handle_t jpd;
+    ESP_ERROR_CHECK(jpeg_new_decoder_engine(&eng_cfg, &jpd));
+
+    // Create PPA SRM (scale-rotate-mirror) client for hardware-accelerated rotation
+    ppa_client_handle_t ppa_srm;
+    ppa_client_config_t ppa_cfg = {
+        .oper_type = PPA_OPERATION_SRM,
+        .max_pending_trans_num = 1,
+    };
+    ESP_ERROR_CHECK(ppa_register_client(&ppa_cfg, &ppa_srm));
+
+    // Write directly to the DPI hardware framebuffer — PPA rotates into it.
+    uint8_t *backbuf = board_lcd_hw_framebuffer();
+    if (!backbuf) backbuf = board_lcd_framebuffer();  // fallback
+    assert(backbuf);
+
+    ESP_LOGI(TAG, "Video task running, target=5fps, rotate=90CW");
+
+    int64_t t_run_start = esp_timer_get_time();
+    int     frame_num   = 0;
+
+    while (1) {
+        int64_t t_frame = esp_timer_get_time();
+        int     ms      = (int)((t_frame - t_run_start) / 1000);
+
+        // --- Fetch ---
+        int64_t t0 = esp_timer_get_time();
+        size_t jpeg_len = fetch_frame(jpeg_in, jpeg_in_size, ms);
+        if (jpeg_len == 0) {
+            // Server still extracting; back off and retry
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+        int64_t t_fetch = esp_timer_get_time() - t0;
+
+        // --- Decode ---
+        t0 = esp_timer_get_time();
+        jpeg_decode_cfg_t dec = {
+            .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
+            .rgb_order     = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
+            .conv_std      = JPEG_YUV_RGB_CONV_STD_BT601,
+        };
+        uint32_t out_used = 0;
+        esp_err_t err = jpeg_decoder_process(jpd, &dec,
+                                             jpeg_in, jpeg_len,
+                                             jpeg_out, jpeg_out_size, &out_used);
+        int64_t t_decode = esp_timer_get_time() - t0;
+
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "JPEG decode failed: %s", esp_err_to_name(err));
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        // --- Rotate 90° CCW via PPA hardware: src(1280×720) → dst(720×1280) ---
+        t0 = esp_timer_get_time();
+        ppa_srm_oper_config_t srm = {
+            .in = {
+                .buffer         = jpeg_out,
+                .pic_w          = SRC_W,
+                .pic_h          = SRC_H,
+                .block_w        = SRC_W,
+                .block_h        = SRC_H,
+                .block_offset_x = 0,
+                .block_offset_y = 0,
+                .srm_cm         = PPA_SRM_COLOR_MODE_RGB565,
+            },
+            .out = {
+                .buffer         = backbuf,
+                .buffer_size    = SRC_W * SRC_H * 2,
+                .pic_w          = SRC_H,   // 720 — width after 90° rotation
+                .pic_h          = SRC_W,   // 1280 — height after 90° rotation
+                .block_offset_x = 0,
+                .block_offset_y = 0,
+                .srm_cm         = PPA_SRM_COLOR_MODE_RGB565,
+            },
+            .rotation_angle = PPA_SRM_ROTATION_ANGLE_90,
+            .scale_x        = 1.0f,
+            .scale_y        = 1.0f,
+            .mirror_x       = false,
+            .mirror_y       = false,
+            .mode           = PPA_TRANS_MODE_BLOCKING,
+        };
+        esp_err_t ppa_err = ppa_do_scale_rotate_mirror(ppa_srm, &srm);
+        int64_t t_rotate = esp_timer_get_time() - t0;
+
+        if (ppa_err != ESP_OK) {
+            ESP_LOGW(TAG, "PPA rotate failed: %s", esp_err_to_name(ppa_err));
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        // PPA writes directly to PSRAM via DMA — no CPU cache flush needed.
+        int64_t t_flush = 0;
+
+        frame_num++;
+        int64_t t_total = esp_timer_get_time() - t_frame;
+        ESP_LOGI(TAG, "frame %4d @%dms | fetch=%lldms dec=%lldms rot=%lldms flush=%lldms total=%lldms",
+                 frame_num, ms,
+                 t_fetch / 1000, t_decode / 1000, t_rotate / 1000, t_flush / 1000,
+                 t_total / 1000);
+
+        // Pace to target 5 fps
+        if (t_total < FRAME_INTERVAL_US) {
+            vTaskDelay(pdMS_TO_TICKS((FRAME_INTERVAL_US - t_total) / 1000));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "M5Stack Tab5 video stream starting");
+    board_init();
+
+    if (!wifi_init()) {
+        ESP_LOGE(TAG, "WiFi failed — halting");
+        while (1) vTaskDelay(portMAX_DELAY);
+    }
+
+    // Video: core 0, priority 5 — PSRAM buffers are heap-allocated, not on stack
+    xTaskCreatePinnedToCore(video_task, "video", 16384, NULL, 5, NULL, 0);
+
+    // Audio: core 1, priority 15 — must preempt video to avoid underruns
+    esp_codec_dev_handle_t spk = board_audio_init();
+    if (spk) {
+        xTaskCreatePinnedToCore(audio_task, "audio", 8192, spk, 15, NULL, 1);
+    } else {
+        ESP_LOGW(TAG, "No audio hardware — running video only");
+    }
+}

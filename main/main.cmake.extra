@@ -1,0 +1,18 @@
+list(APPEND EXTRA_REQUIRES
+    "esp_lcd_st7123"
+    "esp_mm"
+    "esp_hw_support"
+    "nvs_flash"
+    "esp_wifi"
+    "esp_event"
+    "esp_netif"
+    "esp_http_client"
+    "espressif__esp_hosted"
+    "espressif__esp_wifi_remote"
+    "driver"
+    "esp_driver_jpeg"
+    "esp_driver_ppa"
+    "esp_driver_i2s"
+    "espressif__esp_codec_dev"
+    "esp_timer"
+)
