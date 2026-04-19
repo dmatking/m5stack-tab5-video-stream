@@ -166,8 +166,7 @@ def _wait_for_frame(channel: str, frame_num: int) -> Path | None:
     while time.monotonic() < deadline:
         if path.exists() and path.stat().st_size > 0:
             return path
-        # If extraction failed and the frame still isn't there, give up
-        if _state(channel)["status"] == "failed":
+        if _state(channel)["status"] in ("done", "failed"):
             return None
         time.sleep(WAIT_POLL)
     return None
