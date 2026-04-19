@@ -249,12 +249,15 @@ static void audio_task(void *arg)
         size_t got = fetch_audio(u8_buf, AUDIO_CHUNK_SAMPLES,
                                  sample_pos, AUDIO_CHUNK_SAMPLES);
         if (got == 0) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
+            // EOF or transient error — write silence so the DMA paces the A/V clock
+            // at real time rather than stalling s_audio_samples.
+            memset(s16_buf, 0, AUDIO_CHUNK_SAMPLES * sizeof(int16_t));
+            got = AUDIO_CHUNK_SAMPLES;
+        } else {
+            // u8 PCM (0-255, centre=128) → s16 PCM
+            for (size_t i = 0; i < got; i++)
+                s16_buf[i] = (int16_t)((int)u8_buf[i] - 128) << 8;
         }
-        // u8 PCM (0-255, centre=128) → s16 PCM
-        for (size_t i = 0; i < got; i++)
-            s16_buf[i] = (int16_t)((int)u8_buf[i] - 128) << 8;
         esp_codec_dev_write(spk, s16_buf, (int)(got * sizeof(int16_t)));
         atomic_fetch_add(&s_audio_samples, (int64_t)got);
         sample_pos += (int)got;

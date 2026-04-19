@@ -179,7 +179,7 @@ def _wait_for_audio(channel: str, end_sample: int) -> bool:
     while time.monotonic() < deadline:
         if audio_path.exists() and audio_path.stat().st_size >= end_sample:
             return True
-        if _state(channel)["status"] == "failed":
+        if _state(channel)["status"] in ("done", "failed"):
             return False
         time.sleep(WAIT_POLL)
     return False
