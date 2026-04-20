@@ -51,11 +51,12 @@ def _resolve_stream(youtube_url: str) -> tuple[list[str], bool]:
     # Prefer H.265 on Pi 5 for hardware decode, otherwise take best <= 720p
     if HAS_HEVC_HW:
         candidates = [
-            ("bv[height<=720][vcodec~='^hev']+ba/b[height<=720][vcodec~='^hev']", True),
-            ("bv[height<=720]+ba/b[height<=720]", False),
+            # Require direct HTTPS (no HLS) so hevc_v4l2m2m can decode it
+            ("bv[height<=720][vcodec~='^hev'][protocol=https]+ba[protocol=https]/bv[height<=720][vcodec~='^hev'][protocol=https]+ba", True),
+            ("bv[height<=720][protocol=https]+ba[protocol=https]/bv[height<=720]+ba/b[height<=720]", False),
         ]
     else:
-        candidates = [("bv[height<=720]+ba/b[height<=720]", False)]
+        candidates = [("bv[height<=720][protocol=https]+ba[protocol=https]/bv[height<=720]+ba/b[height<=720]", False)]
 
     for fmt, is_hevc in candidates:
         r = subprocess.run(
@@ -109,7 +110,7 @@ def _run_extraction(channel: str, youtube_url: str) -> None:
 
         video_outputs = [] if frames_done else [
             *video_map,
-            "-vf", "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720",
+            "-vf", "scale=991:558",
             "-r", str(FPS), "-q:v", "25",
             str(frames_dir / "frame_%05d.jpg"),
         ]

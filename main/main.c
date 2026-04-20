@@ -46,12 +46,21 @@ static const char *TAG = "APP";
 static EventGroupHandle_t s_wifi_eg;
 static int s_wifi_retries = 0;
 
-// Source (server) frame dimensions
-#define SRC_W  1280
-#define SRC_H  720
+// Source (server) frame dimensions — letterboxed to fit display
+#define SRC_W  991
+#define SRC_H  558
 
-// JPEG input buffer size — 256 KB is generous for 1280×720 at q:v 4
-#define JPEG_IN_MAX  (256 * 1024)
+// Display framebuffer dimensions (portrait: 720 wide × 1280 tall)
+#define DST_W  720
+#define DST_H  1280
+
+// After 90° CW rotation SRC becomes SRC_H × SRC_W in framebuffer coords.
+// Letterbox offsets centre it in DST_W × DST_H.
+#define LBX  ((DST_W - SRC_H) / 2)   // (720 - 558) / 2 = 81
+#define LBY  ((DST_H - SRC_W) / 2)   // (1280 - 991) / 2 = 144
+
+// JPEG input buffer size — 128 KB is generous for 991×558 at q:v 25
+#define JPEG_IN_MAX  (128 * 1024)
 
 // Video pipeline: 2 ping-pong JPEG input slots.
 // Fetch fills slot N while decode+rotate processes slot N-1.
@@ -328,8 +337,12 @@ static void video_decode_task(void *arg)
     if (!backbuf) backbuf = board_lcd_framebuffer();
     assert(backbuf);
 
+    // Black borders stay black for the lifetime of the task — clear once.
+    memset(backbuf, 0, DST_W * DST_H * 2);
+
     int frame_num = 0;
-    ESP_LOGI(TAG, "Video decode task running");
+    ESP_LOGI(TAG, "Video decode task running (letterbox %dx%d in %dx%d, offset %d,%d)",
+             SRC_H, SRC_W, DST_W, DST_H, LBX, LBY);
 
     while (1) {
         int64_t t_wait0 = esp_timer_get_time();
@@ -376,11 +389,11 @@ static void video_decode_task(void *arg)
             },
             .out = {
                 .buffer         = backbuf,
-                .buffer_size    = SRC_W * SRC_H * 2,
-                .pic_w          = SRC_H,
-                .pic_h          = SRC_W,
-                .block_offset_x = 0,
-                .block_offset_y = 0,
+                .buffer_size    = DST_W * DST_H * 2,
+                .pic_w          = DST_W,
+                .pic_h          = DST_H,
+                .block_offset_x = LBX,
+                .block_offset_y = LBY,
                 .srm_cm         = PPA_SRM_COLOR_MODE_RGB565,
             },
             .rotation_angle = PPA_SRM_ROTATION_ANGLE_90,
