@@ -46,9 +46,9 @@ static const char *TAG = "APP";
 static EventGroupHandle_t s_wifi_eg;
 static int s_wifi_retries = 0;
 
-// Source (server) frame dimensions — letterboxed to fit display
-#define SRC_W  991
-#define SRC_H  558
+// Source (server) frame dimensions — must be divisible by 8 for HW JPEG decoder
+#define SRC_W  992
+#define SRC_H  560
 
 // Display framebuffer dimensions (portrait: 720 wide × 1280 tall)
 #define DST_W  720
@@ -56,10 +56,10 @@ static int s_wifi_retries = 0;
 
 // After 90° CW rotation SRC becomes SRC_H × SRC_W in framebuffer coords.
 // Letterbox offsets centre it in DST_W × DST_H.
-#define LBX  ((DST_W - SRC_H) / 2)   // (720 - 558) / 2 = 81
-#define LBY  ((DST_H - SRC_W) / 2)   // (1280 - 991) / 2 = 144
+#define LBX  ((DST_W - SRC_H) / 2)   // (720 - 560) / 2 = 80
+#define LBY  ((DST_H - SRC_W) / 2)   // (1280 - 992) / 2 = 144
 
-// JPEG input buffer size — 128 KB is generous for 991×558 at q:v 25
+// JPEG input buffer size — 128 KB is generous for 992×560 at q:v 25
 #define JPEG_IN_MAX  (128 * 1024)
 
 // Video pipeline: 2 ping-pong JPEG input slots.
