@@ -14,7 +14,7 @@ menu "Video Stream Config"
 
     config SERVER_IP
         string "Server IP address"
-        default "192.168.68.65"
+        default "192.168.1.100"
         help
             IP address of the Pi video stream server.
 
