@@ -80,9 +80,10 @@ static const char *TAG = "BOARD_TAB5";
 #define DSI_LANE_BITRATE    965  // Mbps
 #define DPI_CLOCK_MHZ       70
 
-static esp_lcd_panel_handle_t  s_panel   = NULL;
-static uint8_t                *s_fb      = NULL;  // hardware framebuffer (DPI)
-static uint8_t                *s_backbuf = NULL;  // render buffer (PSRAM)
+static esp_lcd_panel_handle_t  s_panel      = NULL;
+static uint8_t                *s_fbs[2]    = {};  // hardware double-buffers (DPI)
+static int                     s_back_idx  = 0;   // index of the back (render) buffer
+static uint8_t                *s_backbuf   = NULL; // software render buffer (PSRAM)
 
 static i2c_master_bus_handle_t s_i2c_bus  = NULL;  // shared I2C bus 0
 static i2c_master_dev_handle_t s_pi4ioe1  = NULL;  // PI4IOE1 (SPK_EN control)
@@ -291,7 +292,7 @@ void board_init(void)
         .dpi_clk_src        = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
         .dpi_clock_freq_mhz = DPI_CLOCK_MHZ,
         .pixel_format       = LCD_COLOR_PIXEL_FORMAT_RGB565,
-        .num_fbs            = 1,
+        .num_fbs            = 2,
         .video_timing = {
             .h_size            = LCD_W,
             .v_size            = LCD_H,
@@ -327,16 +328,21 @@ void board_init(void)
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
 
-    // 8. Get hardware framebuffer and allocate render buffer
-    void *fb0 = NULL;
-    ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(s_panel, 1, &fb0));
-    s_fb = (uint8_t *)fb0;
+    // 8. Get both hardware framebuffers and allocate software render buffer
+    void *fb0 = NULL, *fb1 = NULL;
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(s_panel, 2, &fb0, &fb1));
+    s_fbs[0] = (uint8_t *)fb0;
+    s_fbs[1] = (uint8_t *)fb1;
+    s_back_idx = 0;
 
     s_backbuf = heap_caps_aligned_calloc(64, FB_SIZE, 1,
                     MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
     assert(s_backbuf);
-    memset(s_fb, 0, FB_SIZE);
-    esp_cache_msync(s_fb, FB_SIZE, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    // Clear both hardware framebuffers to black
+    memset(s_fbs[0], 0, FB_SIZE);
+    esp_cache_msync(s_fbs[0], FB_SIZE, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    memset(s_fbs[1], 0, FB_SIZE);
+    esp_cache_msync(s_fbs[1], FB_SIZE, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 
     // 9. Backlight on (100%)
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LCD_LEDC_CHAN, LCD_LEDC_DUTY_MAX);
@@ -358,9 +364,9 @@ void board_lcd_clear(void)
 
 void board_lcd_flush(void)
 {
-    if (!s_backbuf || !s_fb) return;
-    memcpy(s_fb, s_backbuf, FB_SIZE);
-    esp_cache_msync(s_fb, FB_SIZE, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    if (!s_backbuf || !s_fbs[s_back_idx]) return;
+    memcpy(s_fbs[s_back_idx], s_backbuf, FB_SIZE);
+    board_lcd_commit();
 }
 
 void board_lcd_fill(uint16_t color)
@@ -400,10 +406,17 @@ void board_lcd_unpack_rgb(uint16_t color, uint8_t *r, uint8_t *g, uint8_t *b)
 
 uint8_t *board_lcd_framebuffer(void)      { return s_backbuf; }
 size_t   board_lcd_framebuffer_size(void) { return FB_SIZE; }
-uint8_t *board_lcd_hw_framebuffer(void)   { return s_fb; }
-void     board_lcd_commit(void)
+uint8_t *board_lcd_hw_framebuffer(void)   { return s_fbs[s_back_idx]; }
+
+void board_lcd_commit(void)
 {
-    if (s_fb) esp_cache_msync(s_fb, FB_SIZE, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    // Tell the DPI driver that the back buffer is ready — it detects the pointer
+    // is already an internal framebuffer, skips the copy, syncs cache, and flips
+    // cur_fb_index so the display scans this buffer from the next frame boundary.
+    uint8_t *back = s_fbs[s_back_idx];
+    if (!back || !s_panel) return;
+    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_W, LCD_H, back);
+    s_back_idx ^= 1;
 }
 
 void board_lcd_sanity_test(void)

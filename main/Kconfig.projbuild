@@ -26,7 +26,7 @@ menu "Video Stream Config"
 
     config CHANNEL
         string "Channel name"
-        default "big_buck_bunny"
+        default "never_gonna_give_you_up"
         help
             Channel name as defined in the server's channels.json.
 

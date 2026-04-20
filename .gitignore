@@ -1,0 +1,19 @@
+# ESP-IDF build output
+build/
+sdkconfig          # contains resolved WiFi credentials — configure via menuconfig
+
+# IDF component manager downloads
+managed_components/
+
+# Server cache — video frames and audio extracted by ffmpeg (can be large)
+server/cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+server/*.egg-info/
+
+# Editor / OS
+.DS_Store
+*.swp

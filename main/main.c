@@ -63,7 +63,7 @@ static int s_wifi_retries = 0;
 #define JPEG_IN_MAX  (128 * 1024)
 
 // Video pipeline: 4 slots — pre-buffers 3 frames ahead, tolerates ~100ms WiFi spikes.
-#define PIPELINE_SLOTS  4
+#define PIPELINE_SLOTS  16
 
 // Pipeline globals — allocated in app_main, used by both video tasks.
 static uint8_t         *s_jpeg_in[PIPELINE_SLOTS];
@@ -155,7 +155,13 @@ static bool wifi_init(void)
     EventBits_t bits = xEventGroupWaitBits(s_wifi_eg,
         WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
 
-    if (bits & WIFI_CONNECTED_BIT) return true;
+    if (bits & WIFI_CONNECTED_BIT) {
+        esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
+        wifi_ps_type_t ps_actual = WIFI_PS_MIN_MODEM;
+        esp_wifi_get_ps(&ps_actual);
+        ESP_LOGI(TAG, "WiFi PS set err=%s, readback=%d (0=none)", esp_err_to_name(ps_err), ps_actual);
+        return true;
+    }
     ESP_LOGE(TAG, "Failed to connect to WiFi");
     return false;
 }
@@ -182,65 +188,75 @@ static esp_err_t http_event_cb(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-// Fetches /frame/<channel>/<ms> into jpeg_buf, returns number of bytes
-// received (0 on error).
-static size_t fetch_frame(uint8_t *jpeg_buf, size_t buf_capacity, int ms)
+// Fetches /frame/<channel>/<ms> using a persistent (keep-alive) HTTP client.
+// Returns number of bytes received (0 on error).
+static size_t fetch_frame(esp_http_client_handle_t client, http_ctx_t *ctx,
+                          uint8_t *jpeg_buf, size_t buf_capacity, int ms)
 {
     char url[128];
     snprintf(url, sizeof(url), "http://%s:%d/frame/%s/%d",
              CONFIG_SERVER_IP, CONFIG_SERVER_PORT, CONFIG_CHANNEL, ms);
 
-    http_ctx_t ctx = { .buf = jpeg_buf, .capacity = buf_capacity, .written = 0 };
+    ctx->buf      = jpeg_buf;
+    ctx->capacity = buf_capacity;
+    ctx->written  = 0;
 
-    esp_http_client_config_t hcfg = {
-        .url           = url,
-        .event_handler = http_event_cb,
-        .user_data     = &ctx,
-        .timeout_ms    = 10000,
-        .buffer_size   = 8192,
-    };
-
-    esp_http_client_handle_t client = esp_http_client_init(&hcfg);
-    esp_err_t err = esp_http_client_perform(client);
-    int status    = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
+    esp_http_client_set_url(client, url);
+    esp_err_t err    = esp_http_client_perform(client);
+    int       status = esp_http_client_get_status_code(client);
 
     if (err != ESP_OK || status != 200) {
         ESP_LOGW(TAG, "fetch_frame(%d) err=%s status=%d", ms,
                  esp_err_to_name(err), status);
         return 0;
     }
-    return ctx.written;
+    return ctx->written;
 }
 
 // ---------------------------------------------------------------------------
 // Audio fetch + task
 // ---------------------------------------------------------------------------
 
-static size_t fetch_audio(uint8_t *buf, size_t buf_cap, int start, int count)
+static size_t fetch_audio(esp_http_client_handle_t client, http_ctx_t *ctx,
+                          uint8_t *buf, size_t buf_cap, int start, int count)
 {
     char url[128];
     snprintf(url, sizeof(url), "http://%s:%d/audio/%s/%d/%d",
              CONFIG_SERVER_IP, CONFIG_SERVER_PORT, CONFIG_CHANNEL, start, count);
 
-    http_ctx_t ctx = { .buf = buf, .capacity = buf_cap, .written = 0 };
-    esp_http_client_config_t hcfg = {
-        .url           = url,
-        .event_handler = http_event_cb,
-        .user_data     = &ctx,
-        .timeout_ms    = 5000,
-        .buffer_size   = 4096,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&hcfg);
-    esp_err_t err = esp_http_client_perform(client);
-    int status    = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
+    ctx->buf      = buf;
+    ctx->capacity = buf_cap;
+    ctx->written  = 0;
+
+    esp_http_client_set_url(client, url);
+    esp_err_t err    = esp_http_client_perform(client);
+    int       status = esp_http_client_get_status_code(client);
+
     if (err != ESP_OK || status != 200) {
         ESP_LOGW(TAG, "fetch_audio(%d,%d) err=%s status=%d", start, count,
                  esp_err_to_name(err), status);
         return 0;
     }
-    return ctx.written;
+    return ctx->written;
+}
+
+// Create a persistent HTTP client with keep-alive. The user_data ctx pointer
+// must remain valid for the client's lifetime — the caller owns the ctx struct.
+static esp_http_client_handle_t make_keepalive_client(http_ctx_t *ctx)
+{
+    // Dummy URL — real URL is set per-request via esp_http_client_set_url().
+    static char seed_url[96];
+    snprintf(seed_url, sizeof(seed_url), "http://%s:%d/",
+             CONFIG_SERVER_IP, CONFIG_SERVER_PORT);
+    esp_http_client_config_t hcfg = {
+        .url               = seed_url,
+        .event_handler     = http_event_cb,
+        .user_data         = ctx,
+        .timeout_ms        = 5000,
+        .buffer_size       = 4096,
+        .keep_alive_enable = true,
+    };
+    return esp_http_client_init(&hcfg);
 }
 
 static void audio_task(void *arg)
@@ -272,9 +288,25 @@ static void audio_task(void *arg)
     ESP_LOGI(TAG, "Audio task running @ %d Hz, chunk=%d samples",
              AUDIO_SAMPLE_RATE, AUDIO_CHUNK_SAMPLES);
 
+    static http_ctx_t aud_ctx;
+    esp_http_client_handle_t client = make_keepalive_client(&aud_ctx);
+    assert(client);
+
+    int64_t sum_us = 0, max_us = 0;
+    int     count  = 0;
+
     while (1) {
-        size_t got = fetch_audio(u8_buf, AUDIO_CHUNK_SAMPLES,
-                                 sample_pos, AUDIO_CHUNK_SAMPLES);
+        int64_t t0  = esp_timer_get_time();
+        size_t  got = fetch_audio(client, &aud_ctx, u8_buf, AUDIO_CHUNK_SAMPLES,
+                                  sample_pos, AUDIO_CHUNK_SAMPLES);
+        int64_t dt  = esp_timer_get_time() - t0;
+        sum_us += dt;
+        if (dt > max_us) max_us = dt;
+        if (++count >= 30) {
+            ESP_LOGI(TAG, "aud fetch avg=%lldms max=%lldms over %d chunks",
+                     sum_us / count / 1000, max_us / 1000, count);
+            sum_us = 0; max_us = 0; count = 0;
+        }
         if (got == 0) {
             // EOF or transient error — write silence so the DMA paces the A/V clock
             // at real time rather than stalling s_audio_samples.
@@ -299,21 +331,38 @@ static void video_fetch_task(void *arg)
 {
     ESP_LOGI(TAG, "Video fetch task running");
 
+    static http_ctx_t vid_ctx;
+    esp_http_client_handle_t client = make_keepalive_client(&vid_ctx);
+    assert(client);
+
+    int64_t  sum_us = 0, max_us = 0;
+    int      count  = 0;
+
     while (1) {
         uint8_t slot;
         xQueueReceive(s_free_q, &slot, portMAX_DELAY);
 
         int ms = (int)((esp_timer_get_time() - s_vid_start_us) / 1000);
 
-        size_t len = fetch_frame(s_jpeg_in[slot], s_jpeg_in_size[slot], ms);
+        int64_t t0  = esp_timer_get_time();
+        size_t  len = fetch_frame(client, &vid_ctx,
+                                  s_jpeg_in[slot], s_jpeg_in_size[slot], ms);
+        int64_t dt  = esp_timer_get_time() - t0;
+
         if (len == 0) {
-            // Server not ready — return slot and back off
             xQueueSend(s_free_q, &slot, portMAX_DELAY);
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
 
-        // First successful fetch: reset the video clock to now and release audio.
+        sum_us += dt;
+        if (dt > max_us) max_us = dt;
+        if (++count >= 90) {
+            ESP_LOGI(TAG, "vid fetch avg=%lldms max=%lldms over %d frames",
+                     sum_us / count / 1000, max_us / 1000, count);
+            sum_us = 0; max_us = 0; count = 0;
+        }
+
         if (!atomic_load(&s_av_started)) {
             s_vid_start_us = esp_timer_get_time();
             atomic_store(&s_av_started, true);
@@ -348,16 +397,16 @@ static void video_decode_task(void *arg)
     };
     ESP_ERROR_CHECK(ppa_register_client(&ppa_cfg, &ppa_srm));
 
-    uint8_t *backbuf = board_lcd_hw_framebuffer();
-    if (!backbuf) backbuf = board_lcd_framebuffer();
-    assert(backbuf);
-
-    // Black borders stay black for the lifetime of the task — clear once.
-    memset(backbuf, 0, DST_W * DST_H * 2);
+    // Verify display is available; actual per-frame buffer is fetched inside the loop.
+    assert(board_lcd_hw_framebuffer() || board_lcd_framebuffer());
 
     int frame_num = 0;
     ESP_LOGI(TAG, "Video decode task running (letterbox %dx%d in %dx%d, offset %d,%d)",
              SRC_H, SRC_W, DST_W, DST_H, LBX, LBY);
+
+    // Pace display to content frame rate — prevents decoder from draining the
+    // pipeline faster than fetch can fill it, which causes systematic stutter.
+    TickType_t next_display = xTaskGetTickCount();
 
     while (1) {
         int64_t t_wait0 = esp_timer_get_time();
@@ -390,6 +439,10 @@ static void video_decode_task(void *arg)
         }
 
         // --- Rotate 90° CW via PPA hardware: src(1280×720) → dst(720×1280) ---
+        // Fetch back buffer per frame — it alternates after each board_lcd_commit().
+        uint8_t *backbuf = board_lcd_hw_framebuffer();
+        if (!backbuf) backbuf = board_lcd_framebuffer();
+
         t0 = esp_timer_get_time();
         ppa_srm_oper_config_t srm = {
             .in = {
@@ -426,10 +479,17 @@ static void video_decode_task(void *arg)
             continue;
         }
 
+        // Flip double buffers: back becomes front, front becomes next back.
+        board_lcd_commit();
+
         frame_num++;
         ESP_LOGI(TAG, "frame %4d @%dms | wait=%lldms dec=%lldms rot=%lldms",
                  frame_num, ms,
                  t_wait / 1000, t_decode / 1000, t_rotate / 1000);
+
+        // Cap display rate to content FPS — if we finished early, sleep the remainder.
+        // vTaskDelayUntil catches up without extra delay if we're already late.
+        vTaskDelayUntil(&next_display, pdMS_TO_TICKS(1000 / 20));
     }
 }
 
