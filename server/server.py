@@ -24,7 +24,7 @@ BASE_DIR      = Path(__file__).parent
 CACHE_DIR     = BASE_DIR / "cache"
 CHANNELS_FILE = BASE_DIR / "channels.json"
 
-FPS         = 10
+FPS         = 30
 SAMPLE_RATE = 16000       # Hz, mono, unsigned 8-bit PCM
 WAIT_TIMEOUT = 20.0       # seconds to wait for a frame/audio chunk to appear
 WAIT_POLL    = 0.1        # seconds between polls
