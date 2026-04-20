@@ -141,6 +141,25 @@ H.264/VP9 fall back to software (the Pi 5 CPU handles this at these resolutions)
 
 ---
 
+## Notes
+
+**The channel to play is hardcoded in the firmware.** It is set via `CHANNEL` in
+`menuconfig` (or `sdkconfig.defaults`) and compiled in. To switch to a different video,
+update the channel name, rebuild, and reflash.
+
+---
+
+## TODO
+
+- **Play / pause and volume controls** — use the Tab5's onboard buttons or touchscreen
+  to pause playback and adjust volume without reflashing
+- **On-device channel selection** — browse and switch channels directly from the Tab5
+  touchscreen, no server interaction or reflash required
+- **Server web interface** — a browser UI to add new videos (YouTube URLs or local
+  files), monitor extraction progress, and manage the channel list
+
+---
+
 ## Tuning
 
 | Parameter | Location | Effect |
