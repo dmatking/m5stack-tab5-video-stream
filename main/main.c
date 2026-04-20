@@ -7,9 +7,9 @@
 // portrait.  Frames are rotated 90° CW in software so the full frame fills
 // the screen — hold the device in landscape to view normally.
 //
-// A/V sync: video frame timestamps are derived from the I2S sample counter.
-// esp_codec_dev_write() returns when DMA accepts data, not when it plays.
-// Subtract the DMA buffer depth to get the true playback position.
+// Audio and video both reference wall clock from task start.  True I2S-counter
+// A/V sync is deferred — HTTP audio chunks arrive in 100 ms bursts so the
+// sample counter is too coarse to drive video timestamps smoothly.
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -309,20 +309,11 @@ static void video_task(void *arg)
     int64_t t_run_start = esp_timer_get_time();
     int     frame_num   = 0;
 
-    ESP_LOGI(TAG, "Video task running, A/V sync via I2S sample counter");
+    ESP_LOGI(TAG, "Video task running");
 
     while (1) {
         int64_t t_frame = esp_timer_get_time();
-
-        // A/V sync: video timestamp tracks audio playback position.
-        // Fall back to wall clock until DMA has buffered enough to start.
-        int64_t samples = atomic_load(&s_audio_samples);
-        int ms;
-        if (samples > AUDIO_DMA_LATENCY_SAMPLES) {
-            ms = (int)((samples - AUDIO_DMA_LATENCY_SAMPLES) * 1000 / AUDIO_SAMPLE_RATE);
-        } else {
-            ms = (int)((t_frame - t_run_start) / 1000);
-        }
+        int     ms      = (int)((t_frame - t_run_start) / 1000);
 
         // --- Fetch ---
         int64_t t0 = esp_timer_get_time();
