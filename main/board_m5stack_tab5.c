@@ -183,9 +183,14 @@ static void pi4ioe_init(void)
     i2c_master_transmit(s_pi4ioe1, wb, 2, I2C_TIMEOUT_MS);
     wb[0] = PI4IO_REG_PULL_EN; wb[1] = 0b01111111;
     i2c_master_transmit(s_pi4ioe1, wb, 2, I2C_TIMEOUT_MS);
-    // Drive EXT5V_EN(P2), LCD_RST(P4), TP_RST(P5), CAM_RST(P6) high; leave SPK_EN(P1) low
+    // Drive EXT5V_EN(P2), TP_RST(P5), CAM_RST(P6) high; hold LCD_RST(P4) and SPK_EN(P1) low
+    wb[0] = PI4IO_REG_OUT_SET; wb[1] = 0b01100100;
+    i2c_master_transmit(s_pi4ioe1, wb, 2, I2C_TIMEOUT_MS);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    // Release LCD_RST — ST7123 requires a clean low→high pulse before accepting commands
     wb[0] = PI4IO_REG_OUT_SET; wb[1] = 0b01110100;
     i2c_master_transmit(s_pi4ioe1, wb, 2, I2C_TIMEOUT_MS);
+    vTaskDelay(pdMS_TO_TICKS(120));
 
     i2c_device_config_t dev_cfg2 = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
