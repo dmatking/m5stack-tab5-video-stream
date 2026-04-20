@@ -110,7 +110,7 @@ def _run_extraction(channel: str, youtube_url: str) -> None:
         video_outputs = [] if frames_done else [
             *video_map,
             "-vf", "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720",
-            "-r", str(FPS), "-q:v", "12",
+            "-r", str(FPS), "-q:v", "25",
             str(frames_dir / "frame_%05d.jpg"),
         ]
         audio_outputs = [] if audio_done else [
