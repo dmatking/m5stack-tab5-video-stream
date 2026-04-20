@@ -24,7 +24,7 @@ BASE_DIR      = Path(__file__).parent
 CACHE_DIR     = BASE_DIR / "cache"
 CHANNELS_FILE = BASE_DIR / "channels.json"
 
-FPS         = 30
+FPS         = 10
 SAMPLE_RATE = 16000       # Hz, mono, unsigned 8-bit PCM
 WAIT_TIMEOUT = 20.0       # seconds to wait for a frame/audio chunk to appear
 WAIT_POLL    = 0.1        # seconds between polls
@@ -110,7 +110,7 @@ def _run_extraction(channel: str, youtube_url: str) -> None:
         video_outputs = [] if frames_done else [
             *video_map,
             "-vf", "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720",
-            "-r", str(FPS), "-q:v", "4",
+            "-r", str(FPS), "-q:v", "12",
             str(frames_dir / "frame_%05d.jpg"),
         ]
         audio_outputs = [] if audio_done else [
