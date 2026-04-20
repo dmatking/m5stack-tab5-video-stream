@@ -62,9 +62,8 @@ static int s_wifi_retries = 0;
 // JPEG input buffer size — 128 KB is generous for 992×560 at q:v 25
 #define JPEG_IN_MAX  (128 * 1024)
 
-// Video pipeline: 2 ping-pong JPEG input slots.
-// Fetch fills slot N while decode+rotate processes slot N-1.
-#define PIPELINE_SLOTS  2
+// Video pipeline: 4 slots — pre-buffers 3 frames ahead, tolerates ~100ms WiFi spikes.
+#define PIPELINE_SLOTS  4
 
 // Pipeline globals — allocated in app_main, used by both video tasks.
 static uint8_t         *s_jpeg_in[PIPELINE_SLOTS];
@@ -74,6 +73,10 @@ static int              s_jpeg_ms[PIPELINE_SLOTS];
 static QueueHandle_t    s_free_q;
 static QueueHandle_t    s_ready_q;
 static int64_t          s_vid_start_us;
+
+// Set to true by fetch task on first successful frame — audio task waits on this
+// so both A and V start from content position 0 at the same wall-clock moment.
+static _Atomic bool s_av_started = false;
 
 // Audio: 16 kHz mono u8 PCM.  100 ms chunks → server round-trip fits in DMA buffer.
 #define AUDIO_SAMPLE_RATE         16000
@@ -261,6 +264,10 @@ static void audio_task(void *arg)
     }
     esp_codec_dev_set_out_vol(spk, 75);
 
+    // Wait until the first video frame is displayed so A and V start together.
+    while (!atomic_load(&s_av_started))
+        vTaskDelay(pdMS_TO_TICKS(50));
+
     int sample_pos = 0;
     ESP_LOGI(TAG, "Audio task running @ %d Hz, chunk=%d samples",
              AUDIO_SAMPLE_RATE, AUDIO_CHUNK_SAMPLES);
@@ -305,6 +312,14 @@ static void video_fetch_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
+
+        // First successful fetch: reset the video clock to now and release audio.
+        if (!atomic_load(&s_av_started)) {
+            s_vid_start_us = esp_timer_get_time();
+            atomic_store(&s_av_started, true);
+            ms = 0;
+        }
+
         s_jpeg_len[slot] = len;
         s_jpeg_ms[slot]  = ms;
         xQueueSend(s_ready_q, &slot, portMAX_DELAY);
