@@ -10,7 +10,7 @@
 #include "lv_port.h"
 #include "board_interface.h"
 
-#include "esp_lcd_touch_gt911.h"
+#include "esp_lcd_touch_st7123.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lvgl_port.h"
 #include "esp_log.h"
@@ -22,10 +22,8 @@ static esp_lcd_touch_handle_t s_tp = NULL;
 #define LCD_PHYS_W  720
 #define LCD_PHYS_H  1280
 
-// Touch controller in ST7123 combined IC responds at 0x10 (confirmed by I2C scan).
-// GT911 address macros don't cover this; set directly.
-#define GT911_I2C_ADDR  0x10
-#define GT911_INT_GPIO  GPIO_NUM_23
+#define ST7123_TOUCH_I2C_ADDR  0x55
+#define ST7123_TOUCH_INT_GPIO  GPIO_NUM_23
 
 void lv_port_init(void)
 {
@@ -67,12 +65,11 @@ void lv_port_init(void)
     // ---- Touch ----------------------------------------------------------
     esp_lcd_panel_io_handle_t tp_io = NULL;
     esp_lcd_panel_io_i2c_config_t tp_io_cfg = {
-        .dev_addr              = GT911_I2C_ADDR,
+        .dev_addr              = ST7123_TOUCH_I2C_ADDR,
         .scl_speed_hz          = 400000,
         .control_phase_bytes   = 1,
         .dc_bit_offset         = 0,
         .lcd_cmd_bits          = 16,
-        .lcd_param_bits        = 8,
         .flags.disable_control_phase = 1,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c_v2(
@@ -82,13 +79,13 @@ void lv_port_init(void)
         .x_max        = LCD_PHYS_W,
         .y_max        = LCD_PHYS_H,
         .rst_gpio_num = GPIO_NUM_NC,
-        .int_gpio_num = GT911_INT_GPIO,
+        .int_gpio_num = ST7123_TOUCH_INT_GPIO,
         .levels       = { .reset = 0, .interrupt = 0 },
         .flags        = { .swap_xy = false, .mirror_x = false, .mirror_y = false },
     };
-    esp_err_t tp_err = esp_lcd_touch_new_i2c_gt911(tp_io, &tp_cfg, &s_tp);
+    esp_err_t tp_err = esp_lcd_touch_new_i2c_st7123(tp_io, &tp_cfg, &s_tp);
     if (tp_err != ESP_OK) {
-        ESP_LOGW(TAG, "GT911 init failed (0x%x) — touch disabled", tp_err);
+        ESP_LOGW(TAG, "ST7123 touch init failed (0x%x) — touch disabled", tp_err);
         s_tp = NULL;
     } else {
         lvgl_port_touch_cfg_t touch_cfg = {
@@ -100,7 +97,7 @@ void lv_port_init(void)
         }
     }
 
-    ESP_LOGI(TAG, "LVGL port ready (logical 1280×720, GT911 @ 0x%02x)", GT911_I2C_ADDR);
+    ESP_LOGI(TAG, "LVGL port ready (logical 1280×720, ST7123 touch @ 0x%02x)", ST7123_TOUCH_I2C_ADDR);
 }
 
 void lv_port_lock(void)   { lvgl_port_lock(0); }

@@ -130,8 +130,8 @@ static void open_add_video_modal(void)
 
     // Dialog panel
     lv_obj_t *panel = lv_obj_create(s_modal);
-    lv_obj_set_size(panel, 800, 560);
-    lv_obj_center(panel);
+    lv_obj_set_size(panel, 800, LV_SIZE_CONTENT);
+    lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, 20);
     lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_all(panel, 20, 0);
@@ -183,7 +183,7 @@ static void open_add_video_modal(void)
 
     // Keyboard at bottom of modal
     s_keyboard = lv_keyboard_create(s_modal);
-    lv_obj_set_size(s_keyboard, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_size(s_keyboard, LV_PCT(100), 260);
     lv_obj_align(s_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_keyboard_set_textarea(s_keyboard, s_id_ta);
 

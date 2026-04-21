@@ -10,5 +10,5 @@ dependencies:
     version: ">=9.0.0,<10.0.0"
   espressif/esp_lvgl_port:
     version: "^2"
-  espressif/esp_lcd_touch_gt911:
+  espressif/esp_lcd_touch_st7123:
     version: ">=1.0.0"
