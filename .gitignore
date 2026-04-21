@@ -1,6 +1,8 @@
 # ESP-IDF build output
 build/
-sdkconfig          # contains resolved WiFi credentials — configure via menuconfig
+# sdkconfig contains resolved WiFi credentials — configure via menuconfig
+sdkconfig
+sdkconfig.old
 
 # IDF component manager downloads
 managed_components/
@@ -13,6 +15,9 @@ __pycache__/
 *.pyc
 *.pyo
 server/*.egg-info/
+
+# Claude Code session state
+.claude/
 
 # Editor / OS
 .DS_Store
