@@ -6,3 +6,9 @@ dependencies:
     version: "*"
   espressif/esp_codec_dev:
     version: ">=1.0.0"
+  lvgl/lvgl:
+    version: ">=9.0.0,<10.0.0"
+  espressif/esp_lvgl_port:
+    version: "^2"
+  espressif/esp_lcd_touch_gt911:
+    version: ">=1.0.0"

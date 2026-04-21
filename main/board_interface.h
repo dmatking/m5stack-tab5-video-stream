@@ -6,6 +6,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_codec_dev.h"
+#include "esp_lcd_panel_ops.h"
+#include "esp_lcd_panel_io.h"
+#include "driver/i2c_master.h"
 
 void board_init(void);
 const char *board_get_name(void);
@@ -58,6 +61,24 @@ size_t   board_lcd_framebuffer_size(void);
 // Bypasses the render-buffer copy for lower latency.
 uint8_t *board_lcd_hw_framebuffer(void);
 void     board_lcd_commit(void);  // cache sync only, no memcpy
+
+// Access all hardware framebuffers by index (0 or 1).
+// Used by the HUD to pre-draw into both ping-pong buffers before video starts.
+int      board_lcd_num_hw_fbs(void);
+uint8_t *board_lcd_hw_fb(int idx);
+void     board_lcd_sync_hw_fb(int idx);  // write-back cache for that buffer
+
+// Draw a filled rectangle directly into a specific HW framebuffer.
+// Handles cache writeback automatically.
+void board_lcd_hw_fill_rect(int fb_idx, int x, int y, int w, int h, uint16_t color);
+
+// ---------------------------------------------------------------------------
+// Hardware handles — needed by the LVGL port and touch driver.
+// NULL until board_init() has been called.
+// ---------------------------------------------------------------------------
+esp_lcd_panel_handle_t    board_lcd_panel_handle(void);
+esp_lcd_panel_io_handle_t board_lcd_panel_io_handle(void);
+i2c_master_bus_handle_t   board_i2c_bus_handle(void);
 
 // ---------------------------------------------------------------------------
 // Audio

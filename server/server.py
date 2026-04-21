@@ -2,12 +2,19 @@
 # MJPEG + PCM audio server for M5Stack Tab5 video stream project.
 #
 # Channels are defined in channels.json:
-#   { "channel_name": "https://youtube.com/watch?v=..." }
+#   { "slug": { "url": "https://youtube.com/watch?v=...", "title": "Song Name" } }
 #
 # On first request for a channel, yt-dlp resolves the stream URL and ffmpeg
 # extracts JPEG frames + raw PCM in one pass in a background thread.
 # /frame and /audio requests are served as soon as the relevant content is
 # available on disk — no need to wait for the full video.
+#
+# API:
+#   GET  /info                       — list channels with metadata
+#   GET  /frame/<slug>/<ms>          — JPEG frame at timestamp ms
+#   GET  /audio/<slug>/<start>/<len> — raw u8 PCM at sample offset
+#   POST /channel  {video_id, title} — add a YouTube video
+#   DELETE /channel/<slug>           — remove a channel
 
 import json
 import subprocess
@@ -16,7 +23,7 @@ import threading
 import time
 from pathlib import Path
 
-from flask import Flask, Response, abort
+from flask import Flask, Response, abort, request
 
 app = Flask(__name__)
 
@@ -24,10 +31,10 @@ BASE_DIR      = Path(__file__).parent
 CACHE_DIR     = BASE_DIR / "cache"
 CHANNELS_FILE = BASE_DIR / "channels.json"
 
-FPS         = 20
-SAMPLE_RATE = 16000       # Hz, mono, unsigned 8-bit PCM
-WAIT_TIMEOUT = 20.0       # seconds to wait for a frame/audio chunk to appear
-WAIT_POLL    = 0.1        # seconds between polls
+FPS          = 20
+SAMPLE_RATE  = 16000       # Hz, mono, unsigned 8-bit PCM
+WAIT_TIMEOUT = 20.0        # seconds to wait for a frame/audio chunk to appear
+WAIT_POLL    = 0.1         # seconds between polls
 
 HAS_HEVC_HW = Path("/dev/video19").exists()
 
@@ -48,10 +55,8 @@ def _state(channel: str) -> dict:
 
 def _resolve_stream(youtube_url: str) -> tuple[list[str], bool]:
     """Return ([url, ...], is_hevc).  One URL = muxed, two = video+audio."""
-    # Prefer H.265 on Pi 5 for hardware decode, otherwise take best <= 720p
     if HAS_HEVC_HW:
         candidates = [
-            # Require direct HTTPS (no HLS) so hevc_v4l2m2m can decode it
             ("bv[height<=720][vcodec~='^hev'][protocol=https]+ba[protocol=https]/bv[height<=720][vcodec~='^hev'][protocol=https]+ba", True),
             ("bv[height<=720][protocol=https]+ba[protocol=https]/bv[height<=720]+ba/b[height<=720]", False),
         ]
@@ -76,7 +81,6 @@ def _run_extraction(channel: str, youtube_url: str) -> None:
     frames_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Skip if both outputs already exist from a previous run
         frames_done = frames_dir.exists() and bool(list(frames_dir.glob("frame_*.jpg")))
         audio_done  = audio_path.exists() and audio_path.stat().st_size > 0
         if frames_done and audio_done:
@@ -90,20 +94,19 @@ def _run_extraction(channel: str, youtube_url: str) -> None:
         hw = is_hevc and HAS_HEVC_HW
         print(f"[{channel}] {len(urls)} URL(s), hevc={is_hevc}, hw={hw}")
 
-        # Build ffmpeg input args
         if hw:
             pre = ["-hwaccel", "drm", "-c:v", "hevc_v4l2m2m"]
         else:
             pre = []
 
         if len(urls) == 1:
-            inputs     = [*pre, "-i", urls[0]]
-            video_map  = ["-map", "0:v"]
-            audio_map  = ["-map", "0:a"]
+            inputs    = [*pre, "-i", urls[0]]
+            video_map = ["-map", "0:v"]
+            audio_map = ["-map", "0:a"]
         else:
-            inputs     = [*pre, "-i", urls[0], "-i", urls[1]]
-            video_map  = ["-map", "0:v"]
-            audio_map  = ["-map", "1:a"]
+            inputs    = [*pre, "-i", urls[0], "-i", urls[1]]
+            video_map = ["-map", "0:v"]
+            audio_map = ["-map", "1:a"]
 
         frames_done = bool(list(frames_dir.glob("frame_*.jpg")))
         audio_done  = audio_path.exists() and audio_path.stat().st_size > 0
@@ -121,9 +124,7 @@ def _run_extraction(channel: str, youtube_url: str) -> None:
             str(audio_path),
         ]
 
-        if not video_outputs and not audio_outputs:
-            print(f"[{channel}] nothing to extract")
-        else:
+        if video_outputs or audio_outputs:
             what = " + ".join(filter(None, [
                 None if frames_done else "frames",
                 None if audio_done  else "audio",
@@ -189,17 +190,31 @@ def _wait_for_audio(channel: str, end_sample: int) -> bool:
 # Channel config
 # ---------------------------------------------------------------------------
 
-def load_channels() -> dict[str, str]:
+def load_channels() -> dict[str, dict]:
+    """Return {slug: {url, title}} — normalises the old {slug: url_string} format."""
     if not CHANNELS_FILE.exists():
         return {}
     with open(CHANNELS_FILE) as f:
-        return json.load(f)
+        raw = json.load(f)
+    result = {}
+    for slug, val in raw.items():
+        if isinstance(val, str):
+            result[slug] = {"url": val, "title": slug.replace("_", " ").title()}
+        else:
+            result[slug] = val
+    return result
 
 
-def _channel_info(channel: str) -> dict:
+def save_channels(channels: dict[str, dict]) -> None:
+    with open(CHANNELS_FILE, "w") as f:
+        json.dump(channels, f, indent=2)
+
+
+def _channel_info(channel: str, title: str) -> dict:
     frames_dir = CACHE_DIR / channel / "frames"
     audio_path = CACHE_DIR / channel / "audio.raw"
     return {
+        "title":            title,
         "duration_samples": audio_path.stat().st_size if audio_path.exists() else 0,
         "frame_count":      len(list(frames_dir.glob("frame_*.jpg"))) if frames_dir.exists() else 0,
         "fps":              FPS,
@@ -215,10 +230,49 @@ def _channel_info(channel: str) -> dict:
 @app.route("/info")
 def info():
     channels = load_channels()
-    for ch, url in channels.items():
-        _ensure_extracting(ch, url)
-    result = {ch: _channel_info(ch) for ch in channels}
+    for slug, ch in channels.items():
+        _ensure_extracting(slug, ch["url"])
+    result = {slug: _channel_info(slug, ch["title"]) for slug, ch in channels.items()}
     return Response(json.dumps(result, indent=2), mimetype="application/json")
+
+
+@app.route("/channel", methods=["POST"])
+def add_channel():
+    data     = request.get_json(force=True) or {}
+    video_id = data.get("video_id", "").strip()
+    title    = data.get("title", "").strip()
+    if not video_id:
+        abort(400)
+
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    if not title:
+        r = subprocess.run(
+            ["yt-dlp", "--get-title", youtube_url],
+            capture_output=True, text=True, timeout=15,
+        )
+        title = r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else video_id
+
+    slug = "".join(c if c.isalnum() else "_" for c in video_id)
+
+    channels = load_channels()
+    channels[slug] = {"url": youtube_url, "title": title}
+    save_channels(channels)
+
+    _ensure_extracting(slug, youtube_url)
+
+    return Response(json.dumps({"slug": slug, "title": title}),
+                    mimetype="application/json", status=201)
+
+
+@app.route("/channel/<slug>", methods=["DELETE"])
+def delete_channel(slug):
+    channels = load_channels()
+    if slug not in channels:
+        abort(404)
+    del channels[slug]
+    save_channels(channels)
+    return Response(status=204)
 
 
 @app.route("/frame/<channel>/<int:ms>")
@@ -227,13 +281,12 @@ def frame(channel, ms):
     if channel not in channels:
         abort(404)
 
-    _ensure_extracting(channel, channels[channel])
+    _ensure_extracting(channel, channels[channel]["url"])
 
     frame_num  = max(1, round(ms * FPS / 1000) + 1)
     frame_path = _wait_for_frame(channel, frame_num)
 
     if frame_path is None:
-        # Frame not yet available — try clamping to last extracted frame
         frames = sorted((CACHE_DIR / channel / "frames").glob("frame_*.jpg"))
         if not frames:
             abort(503)
@@ -248,12 +301,11 @@ def audio(channel, start, length):
     if channel not in channels:
         abort(404)
 
-    _ensure_extracting(channel, channels[channel])
+    _ensure_extracting(channel, channels[channel]["url"])
 
     audio_path = CACHE_DIR / channel / "audio.raw"
 
     if not _wait_for_audio(channel, start + length):
-        # Serve whatever is available
         if not audio_path.exists():
             abort(503)
         length = max(0, audio_path.stat().st_size - start)
@@ -276,8 +328,10 @@ if __name__ == "__main__":
 
     if not CHANNELS_FILE.exists():
         print(f"No channels.json found — creating example at {CHANNELS_FILE}")
-        with open(CHANNELS_FILE, "w") as f:
-            json.dump({"example": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}, f, indent=2)
+        save_channels({"example": {
+            "url":   "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "title": "Never Gonna Give You Up - Rick Astley",
+        }})
 
     port     = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
     channels = load_channels()

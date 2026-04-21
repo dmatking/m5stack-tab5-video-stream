@@ -80,10 +80,11 @@ static const char *TAG = "BOARD_TAB5";
 #define DSI_LANE_BITRATE    965  // Mbps
 #define DPI_CLOCK_MHZ       70
 
-static esp_lcd_panel_handle_t  s_panel      = NULL;
-static uint8_t                *s_fbs[2]    = {};  // hardware double-buffers (DPI)
-static int                     s_back_idx  = 0;   // index of the back (render) buffer
-static uint8_t                *s_backbuf   = NULL; // software render buffer (PSRAM)
+static esp_lcd_panel_handle_t    s_panel      = NULL;
+static esp_lcd_panel_io_handle_t s_panel_io   = NULL;
+static uint8_t                  *s_fbs[2]    = {};  // hardware double-buffers (DPI)
+static int                       s_back_idx  = 0;   // index of the back (render) buffer
+static uint8_t                  *s_backbuf   = NULL; // software render buffer (PSRAM)
 
 static i2c_master_bus_handle_t s_i2c_bus  = NULL;  // shared I2C bus 0
 static i2c_master_dev_handle_t s_pi4ioe1  = NULL;  // PI4IOE1 (SPK_EN control)
@@ -283,13 +284,12 @@ void board_init(void)
     ESP_ERROR_CHECK(esp_lcd_new_dsi_bus(&dsi_cfg, &dsi_bus));
 
     // 5. DBI panel IO (command channel over DSI)
-    esp_lcd_panel_io_handle_t io = NULL;
     esp_lcd_dbi_io_config_t dbi_cfg = {
         .virtual_channel = 0,
         .lcd_cmd_bits    = 8,
         .lcd_param_bits  = 8,
     };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_dbi(dsi_bus, &dbi_cfg, &io));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_dbi(dsi_bus, &dbi_cfg, &s_panel_io));
 
     // 6. DPI panel (pixel data)
     esp_lcd_dpi_panel_config_t dpi_cfg = {
@@ -328,7 +328,7 @@ void board_init(void)
         .bits_per_pixel = 24,
         .vendor_config  = &vendor_cfg,
     };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_st7123(io, &dev_cfg, &s_panel));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_st7123(s_panel_io, &dev_cfg, &s_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
@@ -528,4 +528,35 @@ esp_codec_dev_handle_t board_audio_init(void)
 esp_codec_dev_handle_t board_audio_speaker(void)
 {
     return s_spk_dev;
+}
+
+// ---------------------------------------------------------------------------
+// Handle getters — for LVGL port and touch driver init
+// ---------------------------------------------------------------------------
+
+esp_lcd_panel_handle_t    board_lcd_panel_handle(void)    { return s_panel; }
+esp_lcd_panel_io_handle_t board_lcd_panel_io_handle(void) { return s_panel_io; }
+i2c_master_bus_handle_t   board_i2c_bus_handle(void)      { return s_i2c_bus; }
+
+// ---------------------------------------------------------------------------
+// Raw HW framebuffer access — for HUD pre-draw before video mode
+// ---------------------------------------------------------------------------
+
+int      board_lcd_num_hw_fbs(void)      { return 2; }
+uint8_t *board_lcd_hw_fb(int idx)        { return (idx == 0 || idx == 1) ? s_fbs[idx] : NULL; }
+
+void board_lcd_sync_hw_fb(int idx)
+{
+    if (idx < 0 || idx > 1 || !s_fbs[idx]) return;
+    esp_cache_msync(s_fbs[idx], LCD_W * LCD_H * BPP, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+}
+
+void board_lcd_hw_fill_rect(int fb_idx, int x, int y, int w, int h, uint16_t color)
+{
+    if (fb_idx < 0 || fb_idx > 1 || !s_fbs[fb_idx]) return;
+    uint16_t *fb = (uint16_t *)s_fbs[fb_idx];
+    for (int row = y; row < y + h && row < LCD_H; row++)
+        for (int col = x; col < x + w && col < LCD_W; col++)
+            fb[row * LCD_W + col] = color;
+    esp_cache_msync(s_fbs[fb_idx], LCD_W * LCD_H * BPP, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 }

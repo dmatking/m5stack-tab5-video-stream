@@ -7,9 +7,19 @@ if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/main.cmake.extra")
 endif()
 
 idf_component_register(
-    SRCS "main.c" "board_m5stack_tab5.c" "board_defaults.c" ${EXTRA_SRCS}
+    SRCS
+        "main.c"
+        "board_m5stack_tab5.c"
+        "board_defaults.c"
+        "lv_port.c"
+        "ui_menu.c"
+        "player.c"
+        "hud.c"
+        ${EXTRA_SRCS}
     INCLUDE_DIRS "."
-    REQUIRES ${EXTRA_REQUIRES}
+    REQUIRES
+        json
+        ${EXTRA_REQUIRES}
 )
 
 if(EXTRA_DEFINES)
