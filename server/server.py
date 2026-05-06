@@ -249,7 +249,7 @@ def add_channel():
     if not title:
         r = subprocess.run(
             ["yt-dlp", "--get-title", youtube_url],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=30,
         )
         title = r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else video_id
 

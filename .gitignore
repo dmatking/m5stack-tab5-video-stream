@@ -19,6 +19,9 @@ server/*.egg-info/
 # Claude Code session state
 .claude/
 
+# EIM local config
+eim_config.toml
+
 # Editor / OS
 .DS_Store
 *.swp

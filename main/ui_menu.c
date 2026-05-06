@@ -235,6 +235,14 @@ static void populate_list(cJSON *info)
 
         lv_obj_t *btn = lv_list_add_button(s_list, NULL, title);
         lv_obj_set_height(btn, 90);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x16213e), 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x0f3460), LV_STATE_PRESSED);
+        lv_obj_set_style_text_color(btn, lv_color_white(), 0);
+        lv_obj_set_style_text_font(btn, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(0x2a3a5c), 0);
+        lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, 0);
+        lv_obj_set_style_radius(btn, 0, 0);
         lv_obj_add_event_cb(btn, list_tap_cb, LV_EVENT_CLICKED, entry);
     }
 
@@ -353,7 +361,7 @@ void ui_menu_show(void)
 
     // Channel list
     s_list = lv_list_create(s_screen);
-    lv_obj_set_size(s_list, LV_PCT(100), LV_PCT(100) - 80);
+    lv_obj_set_size(s_list, LV_PCT(100), 640);  // 720 logical height - 80px header
     lv_obj_align(s_list, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_bg_color(s_list, lv_color_hex(0x1a1a2e), 0);
     lv_obj_set_style_border_width(s_list, 0, 0);

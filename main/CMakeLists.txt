@@ -18,7 +18,6 @@ idf_component_register(
         ${EXTRA_SRCS}
     INCLUDE_DIRS "."
     REQUIRES
-        json
         ${EXTRA_REQUIRES}
 )
 

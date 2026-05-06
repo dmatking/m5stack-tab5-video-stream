@@ -49,14 +49,14 @@ static const char *TAG = "HUD";
 #define VID_LY2     639
 
 // ---------------------------------------------------------------------------
-// RGB565 palette
+// RGB565 palette — dark modern theme
 // ---------------------------------------------------------------------------
-#define C_BG        0x18C3u   // dark blue-gray
-#define C_BACK      0xFC00u   // orange
-#define C_PLAY      0x07E0u   // green
-#define C_PAUSE     0xFFE0u   // yellow
-#define C_NEXT      0x001Fu   // blue
-#define C_VOL_FILL  0x07E0u   // green
+#define C_BG        0x0882u   // #0D1117 near-black
+#define C_BACK      0xA180u   // #A03000 burnt amber
+#define C_PLAY      0x2584u   // #207840 muted green
+#define C_PAUSE     0xD4A0u   // #D09400 amber gold
+#define C_NEXT      0x2318u   // #2060C0 steel blue
+#define C_VOL_FILL  0x2584u   // #207840 muted green
 #define C_WHITE     0xFFFFu
 
 // ---------------------------------------------------------------------------
